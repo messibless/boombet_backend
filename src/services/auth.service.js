@@ -392,7 +392,7 @@ module.exports = {
   getBalance,
   getProfile,
   forgotPasswordRequest, 
-  resetPassword,          
+  resetPassword,
   changePasswordByPhone ,
   adminGetAllUsers,
   adminGetUserByPhone,

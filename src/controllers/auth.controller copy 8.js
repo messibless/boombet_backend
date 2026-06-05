@@ -3,26 +3,22 @@ const userRepository = require('../repositories/user.repository');
 const axios = require('axios');
 const crypto = require('crypto');
 
-// ============ MONGIKE CONFIGURATION ============
-const MONGIKE = {
-  apiKey: 'mk_86b0b00fc59c39e6bd67e4307ec5560a827bece0c8fbf092', // CHANGE THIS - get from Mongike dashboard
-  baseUrl: 'https://mongike.com/api/v1',
-  paymentUrl: 'https://mongike.com/api/v1/payments/mobile-money/tanzania',
-  webhookSecret: 'your_webhook_secret_here', // CHANGE THIS - if provided by Mongike
-  success_url: 'https://betnoer.com/user/deposit/history',
-  failed_url: 'https://betnovr.com/user/deposit/history'
+// ============ PAYOU CONFIGURATION ============
+const PAYOU = {
+  merchantId: '1031',
+  secret: '99fcaf0a5a09eb767eed96598dd4719e',
+  paymentUrl: 'https://pay.payou.cc/sci/v1/',
+  paymentMethod: 'MoneyTZS_Spy',
+  success_url: 'https://betnover.com/user/deposit/history',
+  failed_url: 'https://betnover.com/user/deposit/history'
 };
 
-// ============ SNIPPE CONFIGURATION (Unchanged) ============
+
+// ============ SNIPPE CONFIGURATION  ============
 const SNIPPE_CONFIG = {
   apiKey: 'snp_249e0510a26caa291588dd422a8c098005deb3771f2841afb93e6013d530f8f7',
   baseUrl: 'https://api.snippe.sh'
 };
-
-// Store pending payments for Mongike
-if (!global.mongikePayments) {
-  global.mongikePayments = new Map();
-}
 
 // Helper function to format phone number
 function formatPhoneNumber(phone) {
@@ -40,26 +36,33 @@ function generateReference() {
   return `REF-${Date.now()}-${Math.random().toString(36).substr(2, 8)}`;
 }
 
-function generateMongikeRef(prefix = 'MONG') {
+function generatePayouRef(prefix = 'PAYOU') {
   return `${prefix}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
 }
 
-// ============ DEPOSIT MONEY WITH MONGIKE ============
+function md5(str) {
+  return crypto.createHash('md5').update(str).digest('hex');
+}
+
+// Generate Payou hash
+function generatePayouHash(id, summ, secret, system, orderId) {
+  return md5(`${id}:${summ}:${secret}:${system}:${orderId}`);
+}
+
+// Store pending payments for Payou
+if (!global.payouPayments) {
+  global.payouPayments = new Map();
+}
+
+// ============ DEPOSIT MONEY WITH PAYOU (REDIRECT METHOD) ============
 const depositMoney = async (req, res) => {
   try {
     const userId = req.user.id;
-    const { amount, phone_number, fee_payer = 'MERCHANT' } = req.body;
+    const { amount } = req.body;
 
-    // Validation
-    if (!amount || amount < 500) {
+    if (!amount || amount < 100) {
       return res.status(400).json({ 
-        message: 'Amount must be at least 500 TZS' 
-      });
-    }
-
-    if (!phone_number) {
-      return res.status(400).json({ 
-        message: 'Phone number is required for payment' 
+        message: 'Amount must be at least 100 TZS' 
       });
     }
 
@@ -70,187 +73,136 @@ const depositMoney = async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Format phone number for Mongike (without +)
-    const formattedPhone = formatPhoneNumber(phone_number);
-    // Remove '255' prefix if present (Mongike expects 255... format)
-    const mongikePhone = formattedPhone.startsWith('255') ? formattedPhone : `255${formattedPhone}`;
-    
-    const order_id = generateMongikeRef('MONG');
-    const summ = Number(amount).toFixed(0); // Mongike expects whole number (no decimals)
+    const summ = Number(amount).toFixed(2);
+    const order_id = generatePayouRef('PAYOU');
+    const user_code = userId.toString();
+    const user_email = user.email || `${userId}@user.com`;
 
-    // Prepare request to Mongike
-    const requestBody = {
-      order_id: order_id,
-      amount: parseFloat(summ),
-      buyer_phone: mongikePhone,
-      fee_payer: fee_payer, // 'MERCHANT' or 'CUSTOMER'
-      buyer_name: user.full_name || user.name || 'Customer',
-      buyer_email: user.email || `${userId}@user.com`,
-      metadata: {
-        user_id: userId,
-        source: 'boombet_frontend',
-        phone: user.phone_number
-      }
-    };
-
-    console.log('=== MONGIKE DEPOSIT INITIATION ===');
-    console.log('User ID:', userId);
-    console.log('Amount:', amount);
-    console.log('Order ID:', order_id);
-    console.log('Phone:', mongikePhone);
-
-    // Call Mongike API
-    const response = await axios.post(
-      MONGIKE.paymentUrl,
-      requestBody,
-      {
-        headers: {
-          'x-api-key': MONGIKE.apiKey,
-          'Content-Type': 'application/json'
-        },
-        timeout: 30000
-      }
+    // Generate hash
+    const hash = generatePayouHash(
+      PAYOU.merchantId,
+      summ,
+      PAYOU.secret,
+      PAYOU.paymentMethod,
+      order_id
     );
 
-    const result = response.data;
+    // Build redirect URL
+    const paymentUrl = `${PAYOU.paymentUrl}?` + new URLSearchParams({
+      id: PAYOU.merchantId,
+      sistems: PAYOU.paymentMethod,
+      summ: summ,
+      order_id: order_id,
+      user_code: user_code,
+      user_email: user_email,
+      hash: hash,
+      success_url: PAYOU.success_url,
+      failed_url: PAYOU.failed_url
+    }).toString();
 
-    if (result.status !== 'success') {
-      console.error('Mongike initiation failed:', result);
-      return res.status(400).json({
-        message: result.message || 'Payment initiation failed'
-      });
-    }
-
-    // Store pending payment for webhook/confirmation
-    global.mongikePayments.set(order_id, {
+    // Store pending payment for webhook
+    global.payouPayments.set(order_id, {
       user_id: userId,
       amount: Number(amount),
       status: 'pending',
       timestamp: Date.now(),
-      order_id: order_id,
-      mongike_id: result.data.id,
-      gateway_ref: result.data.gateway_ref,
-      expires_at: result.data.expires_at,
-      phone: mongikePhone
+      order_id: order_id
     });
 
-    console.log('✅ Mongike payment initiated:', {
-      payment_id: result.data.id,
-      status: result.data.status,
-      expires_at: result.data.expires_at
-    });
+    console.log('=== PAYOU DEPOSIT ===');
+    console.log('User ID:', userId);
+    console.log('Amount:', amount);
+    console.log('Order ID:', order_id);
+    console.log('Payment URL:', paymentUrl);
 
     res.status(200).json({
-      message: 'Payment initiated successfully. Please check your phone and enter PIN to complete payment.',
+      message: 'Redirecting to payment page',
       data: {
-        payment_id: result.data.id,
+        paymentUrl: paymentUrl,
         order_id: order_id,
         amount: amount,
-        status: result.data.status,
-        gateway_ref: result.data.gateway_ref,
-        expires_at: result.data.expires_at,
-        instruction: 'Open your mobile money app and enter PIN to complete payment'
+        status: 'pending'
       }
     });
 
   } catch (error) {
-    console.error('Mongike deposit error:', {
-      message: error.message,
-      response: error.response?.data,
-      status: error.response?.status
-    });
-    
+    console.error('Payou deposit error:', error);
     res.status(500).json({ 
-      message: error.response?.data?.message || 'Failed to initiate deposit. Please try again.'
+      message: 'Failed to initiate deposit. Please try again.'
     });
   }
 };
 
-// ============ MONGIKE WEBHOOK (Called by Mongike when payment completes) ============
-const mongikeWebhook = async (req, res) => {
-  console.log('🔔 Mongike Webhook received:', req.body);
+// ============ PAYOU WEBHOOK (REFACTORED - FOLLOWS YOUR LAYERS) ============
+const payouWebhook = async (req, res) => {
+  console.log(' Payou Webhook received:', req.body);
 
-  const webhookData = req.body;
+  const body = req.body;
 
-  // 1. Verify webhook signature if Mongike provides one
-  // (Add signature verification here if Mongike provides webhook secret)
-  
-  // 2. Extract payment data
-  const { order_id, status, gateway_ref, transaction_id, amount } = webhookData;
+  // 1. VERIFY SIGNATURE
+  const expectedSign = md5(
+    `${PAYOU.merchantId}:${body.AMOUNT}:${PAYOU.secret}:${body.status}:${body.intid}:${body.MERCHANT_ORDER_ID}`
+  );
 
-  if (!order_id) {
-    console.log('❌ No order_id in webhook');
-    return res.status(400).json({ error: 'Missing order_id' });
+  if (expectedSign !== body.SIGN) {
+    console.log(' Invalid signature');
+    return res.status(400).send(`${body.MERCHANT_ORDER_ID}|error`);
   }
 
-  // 3. Get pending payment from global store
-  const pendingPayment = global.mongikePayments.get(order_id);
+  // 2. GET PENDING PAYMENT FROM GLOBAL STORE
+  const pendingPayment = global.payouPayments.get(body.MERCHANT_ORDER_ID);
 
   if (!pendingPayment) {
-    console.log('❌ Pending payment not found:', order_id);
-    return res.status(404).json({ error: 'Transaction not found' });
+    console.log(' Pending payment not found:', body.MERCHANT_ORDER_ID);
+    return res.status(404).send(`${body.MERCHANT_ORDER_ID}|error`);
   }
 
-  // 4. Check if already processed
+  if (body.status !== 'success') {
+    console.log(' Payment not successful:', body.status);
+    return res.send(`${body.MERCHANT_ORDER_ID}|error`);
+  }
+
   if (pendingPayment.status === 'completed') {
-    console.log('✅ Payment already processed:', order_id);
-    return res.status(200).json({ message: 'Already processed' });
+    console.log(' Payment already processed');
+    return res.send(`${body.MERCHANT_ORDER_ID}|success`);
   }
 
-  // 5. Process only if payment is successful
-  if (status !== 'success' && status !== 'COMPLETED') {
-    console.log('⚠️ Payment not successful:', status);
-    pendingPayment.status = 'failed';
-    global.mongikePayments.set(order_id, pendingPayment);
-    return res.status(200).json({ message: 'Payment not successful' });
-  }
-
-  // 6. UPDATE USER BALANCE USING YOUR EXISTING userService.deposit()
+  // 3. UPDATE USER BALANCE USING YOUR EXISTING userService.deposit()
   try {
-    const amountToAdd = parseFloat(amount) || pendingPayment.amount;
+    const amountToAdd = parseFloat(body.AMOUNT) || pendingPayment.amount;
     
-    // CALL YOUR EXISTING SERVICE METHOD
+    // CALL YOUR EXISTING SERVICE METHOD - hii itaenda kwenye service layer
     const depositResult = await userService.deposit(pendingPayment.user_id, amountToAdd);
     
-    // 7. UPDATE PENDING PAYMENT STATUS
+    // 4. UPDATE PENDING PAYMENT STATUS
     pendingPayment.status = 'completed';
     pendingPayment.balance_added = true;
-    pendingPayment.transaction_id = transaction_id || gateway_ref;
-    pendingPayment.completed_at = new Date().toISOString();
-    global.mongikePayments.set(order_id, pendingPayment);
+    pendingPayment.transaction_id = body.intid;
+    global.payouPayments.set(body.MERCHANT_ORDER_ID, pendingPayment);
 
-    console.log(`✅ Balance updated successfully via Mongike webhook`);
+    console.log(` Balance updated successfully via userService.deposit()`);
     console.log(`   User: ${pendingPayment.user_id}`);
     console.log(`   Amount: +${amountToAdd} TZS`);
     console.log(`   Old balance: ${depositResult.previous_balance}`);
     console.log(`   New balance: ${depositResult.new_balance}`);
-    console.log(`   Order ID: ${order_id}`);
-    console.log(`   Gateway Ref: ${gateway_ref}`);
 
-    return res.status(200).json({ 
-      message: 'Payment processed successfully',
-      order_id: order_id,
-      status: 'success'
-    });
+    return res.send(`${body.MERCHANT_ORDER_ID}|success`);
 
   } catch (error) {
-    console.error('❌ Error updating balance via webhook:', error);
-    return res.status(500).json({ 
-      error: 'Failed to process payment',
-      order_id: order_id
-    });
+    console.error(' Error updating balance:', error);
+    return res.send(`${body.MERCHANT_ORDER_ID}|error`);
   }
 };
 
-// ============ CHECK PAYMENT STATUS (For Mongike) ============
+// ============ CHECK PAYMENT STATUS (UPDATED FOR PAYOU) ============
 const checkPaymentStatus = async (req, res) => {
   try {
     const { reference } = req.params;
     const userId = req.user.id;
 
-    console.log('Checking Mongike payment status for reference:', reference);
+    console.log('Checking Payou payment status for reference:', reference);
 
-    const pendingPayment = global.mongikePayments.get(reference);
+    const pendingPayment = global.payouPayments.get(reference);
 
     if (!pendingPayment) {
       return res.status(200).json({
@@ -260,46 +212,21 @@ const checkPaymentStatus = async (req, res) => {
       });
     }
 
-    // Check if user owns this payment
-    if (pendingPayment.user_id !== userId) {
-      return res.status(403).json({
-        success: false,
-        status: 'unauthorized',
-        message: 'You do not own this payment'
-      });
-    }
-
     if (pendingPayment.status === 'completed') {
-      // Get updated user balance
-      const user = await userRepository.findById(userId);
       return res.status(200).json({
         success: true,
         status: 'completed',
         data: {
           reference: reference,
-          amount: pendingPayment.amount,
-          new_balance: user?.balance || 0,
-          gateway_ref: pendingPayment.gateway_ref
+          amount: pendingPayment.amount
         }
-      });
-    }
-
-    // Check if payment has expired
-    if (pendingPayment.expires_at && new Date(pendingPayment.expires_at) < new Date()) {
-      pendingPayment.status = 'expired';
-      global.mongikePayments.set(reference, pendingPayment);
-      return res.status(200).json({
-        success: false,
-        status: 'expired',
-        message: 'Payment has expired. Please initiate a new deposit.'
       });
     }
 
     return res.status(200).json({
       success: false,
       status: 'pending',
-      message: 'Payment still pending. Please complete payment on your phone.',
-      expires_at: pendingPayment.expires_at
+      message: 'Payment still pending. Complete payment on Payou page.'
     });
 
   } catch (error) {
@@ -312,144 +239,8 @@ const checkPaymentStatus = async (req, res) => {
   }
 };
 
-// ============ CONFIRM DEPOSIT (Called from frontend success page) ============
-const confirmDeposit = async (req, res) => {
-  try {
-    const { order_id } = req.body;
-    const userId = req.user?.id; // May come from auth or not
-    
-    if (!order_id) {
-      return res.status(400).json({
-        success: false,
-        message: 'Order ID is required'
-      });
-    }
 
-    // Get pending payment from global store
-    const pendingPayment = global.mongikePayments.get(order_id);
-
-    if (!pendingPayment) {
-      return res.status(404).json({
-        success: false,
-        message: 'Transaction not found'
-      });
-    }
-
-    // Check if already processed
-    if (pendingPayment.status === 'completed') {
-      const user = await userRepository.findById(pendingPayment.user_id);
-      return res.status(200).json({
-        success: true,
-        message: 'Deposit already processed',
-        amount: pendingPayment.amount,
-        new_balance: user?.balance || 0
-      });
-    }
-
-    // Check if payment is still pending (not confirmed by webhook yet)
-    // In this case, we'll try to query Mongike for status
-    // For now, return pending status
-    return res.status(200).json({
-      success: false,
-      status: 'pending',
-      message: 'Payment is being processed. You will receive confirmation shortly.',
-      order_id: order_id,
-      amount: pendingPayment.amount
-    });
-
-  } catch (error) {
-    console.error('Confirm deposit error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Failed to process deposit'
-    });
-  }
-};
-
-// ============ MANUAL DEPOSIT CONFIRMATION (Admin Fallback) ============
-const manualConfirmDeposit = async (req, res) => {
-  try {
-    const { order_id, amount } = req.body;
-    const userId = req.user.id;
-    
-    const pendingPayment = global.mongikePayments.get(order_id);
-    
-    if (!pendingPayment) {
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Payment record not found' 
-      });
-    }
-    
-    if (pendingPayment.user_id !== userId && !req.user.isAdmin) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'Unauthorized' 
-      });
-    }
-    
-    if (pendingPayment.status === 'completed') {
-      return res.status(400).json({ 
-        success: false, 
-        message: 'Payment already processed' 
-      });
-    }
-    
-    // Process deposit manually
-    const depositResult = await userService.deposit(
-      pendingPayment.user_id, 
-      amount || pendingPayment.amount
-    );
-    
-    // Update status
-    pendingPayment.status = 'completed';
-    pendingPayment.manual_confirmed = true;
-    pendingPayment.confirmed_by = userId;
-    pendingPayment.confirmed_at = new Date().toISOString();
-    global.mongikePayments.set(order_id, pendingPayment);
-    
-    res.status(200).json({
-      success: true,
-      message: 'Deposit confirmed manually',
-      data: depositResult
-    });
-    
-  } catch (error) {
-    console.error('Manual confirm error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// ============ CHECK PENDING PAYMENTS (For user dashboard) ============
-const checkPendingPayments = async (req, res) => {
-  try {
-    const userId = req.user.id;
-    const pendingPayments = [];
-    
-    for (const [orderId, payment] of global.mongikePayments.entries()) {
-      if (payment.user_id === userId && payment.status === 'pending') {
-        pendingPayments.push({
-          order_id: orderId,
-          amount: payment.amount,
-          timestamp: payment.timestamp,
-          status: payment.status,
-          expires_at: payment.expires_at,
-          gateway_ref: payment.gateway_ref
-        });
-      }
-    }
-    
-    res.status(200).json({
-      success: true,
-      data: pendingPayments
-    });
-  } catch (error) {
-    console.error('Check pending payments error:', error);
-    res.status(500).json({ success: false, message: error.message });
-  }
-};
-
-// ============ WITHDRAW MONEY WITH SNIPPE (Unchanged) ============
+// ============ WITHDRAW MONEY WITH SNIPPE (UNCHANGED) ============
 const withdrawMoney = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -486,7 +277,7 @@ const withdrawMoney = async (req, res) => {
       amount: Number(amount),
       channel: "mobile",
       recipient_phone: formattedPhone,
-      recipient_name: user.full_name || "Snippe User",
+      recipient_name: "Snippe User",
       narration: `Withdrawal from wallet`,
       webhook_url: "https://your-server.com/webhook",
       metadata: {
@@ -542,7 +333,7 @@ const withdrawMoney = async (req, res) => {
   }
 };
 
-// ============ ADMIN WITHDRAW (Unchanged) ============
+// ============ ADMIN WITHDRAW (UNCHANGED) ============
 const AdminWithdrawMoney = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -579,7 +370,7 @@ const AdminWithdrawMoney = async (req, res) => {
       amount: Number(amount),
       channel: "mobile",
       recipient_phone: formattedPhone,
-      recipient_name: user.full_name || "Snippe User",
+      recipient_name: "Snippe User",
       narration: `Withdrawal from wallet`,
       webhook_url: "https://your-server.com/webhook",
       metadata: {
@@ -634,24 +425,26 @@ const AdminWithdrawMoney = async (req, res) => {
     });
   }
 };
-
 const AdminWithdrawMoneyDb = async (req, res) => {
   try {
     const userId = req.user.id;
     const { amount } = req.body;
 
+    // Validation - minimum amount
     if (!amount || amount < 1000) {
       return res.status(400).json({ 
         message: 'Minimum withdrawal amount is 1000 TZS' 
       });
     }
 
+    // Get user from database
     const user = await userRepository.findById(userId);
 
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
+    // Check balance
     const currentBalance = parseFloat(user.balance) || 0;
     if (currentBalance < amount) {
       return res.status(400).json({ 
@@ -659,8 +452,20 @@ const AdminWithdrawMoneyDb = async (req, res) => {
       });
     }
 
+    // Calculate new balance
     const newBalance = currentBalance - amount;
+    
+    // Update balance in database only
     await userRepository.updateBalance(userId, newBalance);
+
+    // Optional: Create withdrawal record in database
+    // await withdrawalRepository.create({
+    //   user_id: userId,
+    //   amount: amount,
+    //   status: 'processed',
+    //   phone_number: user.phone_number,
+    //   processed_at: new Date()
+    // });
 
     console.log('=== WITHDRAWAL PROCESSED ===');
     console.log('User ID:', userId);
@@ -669,6 +474,7 @@ const AdminWithdrawMoneyDb = async (req, res) => {
     console.log('Old Balance:', currentBalance);
     console.log('New Balance:', newBalance);
 
+    // Return success response
     res.status(200).json({
       message: `TZS ${amount.toLocaleString()} imetolewa kwenye akaunti yako. Salio lako sasa ni TZS ${newBalance.toLocaleString()}`,
       data: {
@@ -689,7 +495,7 @@ const AdminWithdrawMoneyDb = async (req, res) => {
   }
 };
 
-// ============ CHECK BALANCE (Unchanged) ============
+// ============ CHECK BALANCE (UNCHANGED) ============
 const checkBalance = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -707,7 +513,7 @@ const checkBalance = async (req, res) => {
   }
 };
 
-// ============ GET PROFILE (Unchanged) ============
+// ============ GET PROFILE (UNCHANGED) ============
 const getProfile = async (req, res) => {
   try {
     const userId = req.user.id;
@@ -724,7 +530,7 @@ const getProfile = async (req, res) => {
   }
 };
 
-// ============ REGISTER (Unchanged) ============
+// ============ REGISTER (UNCHANGED) ============
 const register = async (req, res) => {
   try {
     const { phone_number, password } = req.body;
@@ -747,7 +553,7 @@ const register = async (req, res) => {
   }
 };
 
-// ============ LOGIN (Unchanged) ============
+// ============ LOGIN (UNCHANGED) ============
 const login = async (req, res) => {
   try {
     const { phone_number, password } = req.body;
@@ -770,7 +576,7 @@ const login = async (req, res) => {
   }
 };
 
-// ============ REFRESH TOKEN (Unchanged) ============
+// ============ REFRESH TOKEN (UNCHANGED) ============
 const refreshToken = async (req, res) => {
   try {
     const { refreshToken } = req.body;
@@ -787,7 +593,7 @@ const refreshToken = async (req, res) => {
   }
 };
 
-// ============ CHECK ADMIN STATUS (Unchanged) ============
+// ============ CHECK ADMIN STATUS (UNCHANGED) ============
 const checkAdminStatus = async (req, res) => {
   try {
     const user = req.user;
@@ -806,7 +612,152 @@ const checkAdminStatus = async (req, res) => {
   }
 };
 
-// ============ FORGOT PASSWORD FUNCTIONS (Unchanged) ============
+
+// ============ MANUAL CHECK PENDING PAYMENTS (ADD TO CONTROLLER) ============
+const checkPendingPayments = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const pendingPayments = [];
+    
+    for (const [orderId, payment] of global.payouPayments.entries()) {
+      if (payment.user_id === userId && payment.status === 'pending') {
+        pendingPayments.push({
+          order_id: orderId,
+          amount: payment.amount,
+          timestamp: payment.timestamp,
+          status: payment.status
+        });
+      }
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: pendingPayments
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// ============ MANUAL DEPOSIT CONFIRMATION (FALLBACK) ============
+const manualConfirmDeposit = async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const { order_id, amount } = req.body;
+    
+    const pendingPayment = global.payouPayments.get(order_id);
+    
+    if (!pendingPayment) {
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Payment record not found' 
+      });
+    }
+    
+    if (pendingPayment.user_id !== userId) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Unauthorized' 
+      });
+    }
+    
+    if (pendingPayment.status === 'completed') {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Payment already processed' 
+      });
+    }
+    
+    // Process deposit manually
+    const depositResult = await userService.deposit(userId, amount || pendingPayment.amount);
+    
+    // Update status
+    pendingPayment.status = 'completed';
+    pendingPayment.manual_confirmed = true;
+    global.payouPayments.set(order_id, pendingPayment);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Deposit confirmed manually',
+      data: depositResult
+    });
+    
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+// ============ CONFIRM DEPOSIT (CALLED FROM SUCCESS PAGE) ============
+const confirmDeposit = async (req, res) => {
+  try {
+      const { order_id } = req.body;
+      
+      if (!order_id) {
+          return res.status(400).json({
+              success: false,
+              message: 'Order ID is required'
+          });
+      }
+
+      // Get pending payment from global store
+      const pendingPayment = global.payouPayments.get(order_id);
+
+      if (!pendingPayment) {
+          return res.status(404).json({
+              success: false,
+              message: 'Transaction not found'
+          });
+      }
+
+      // Check if already processed
+      if (pendingPayment.status === 'completed') {
+          // Get user to return current balance
+          const user = await userRepository.findById(pendingPayment.user_id);
+          return res.status(200).json({
+              success: true,
+              message: 'Deposit already processed',
+              amount: pendingPayment.amount,
+              new_balance: user?.balance || 0
+          });
+      }
+
+      // Process the deposit using your service
+      const depositResult = await userService.deposit(
+          pendingPayment.user_id, 
+          pendingPayment.amount
+      );
+
+      // Update pending payment status
+      pendingPayment.status = 'completed';
+      pendingPayment.confirmed_at = new Date().toISOString();
+      global.payouPayments.set(order_id, pendingPayment);
+
+      console.log('✅ Deposit confirmed via success page:', {
+          order_id,
+          user_id: pendingPayment.user_id,
+          amount: pendingPayment.amount,
+          new_balance: depositResult.new_balance
+      });
+
+      res.status(200).json({
+          success: true,
+          message: 'Deposit successful',
+          amount: pendingPayment.amount,
+          new_balance: depositResult.new_balance
+      });
+
+  } catch (error) {
+      console.error('Confirm deposit error:', error);
+      res.status(500).json({
+          success: false,
+          message: error.message || 'Failed to process deposit'
+      });
+  }
+};
+
+
+// ============ FORGOT PASSWORD FUNCTIONS ============
+
+// STEP 1: Request password reset (user enters phone number)
 const forgotPassword = async (req, res) => {
   try {
     const { phone_number } = req.body;
@@ -817,11 +768,14 @@ const forgotPassword = async (req, res) => {
       });
     }
 
+    // Call service to check if user exists
     const result = await userService.forgotPasswordRequest(phone_number);
 
+    // Always return success for security (don't reveal if user exists)
     res.status(200).json({
       success: true,
       message: 'If phone number exists in our system, you can proceed to reset your password',
+      // Only include userId if needed for next step (you can send via session/temp token instead)
       userId: result.userId 
     });
 
@@ -833,6 +787,7 @@ const forgotPassword = async (req, res) => {
   }
 };
 
+// STEP 2: Reset password using userId
 const resetPassword = async (req, res) => {
   try {
     const { userId, newPassword, confirmPassword } = req.body;
@@ -843,6 +798,7 @@ const resetPassword = async (req, res) => {
       });
     }
 
+    // Call service to reset password
     const result = await userService.resetPassword(userId, newPassword, confirmPassword);
 
     res.status(200).json({
@@ -861,6 +817,7 @@ const resetPassword = async (req, res) => {
   }
 };
 
+// ALTERNATIVE: Single step reset using phone number (simpler)
 const changePasswordByPhone = async (req, res) => {
   try {
     const { phone_number, newPassword, confirmPassword } = req.body;
@@ -871,6 +828,7 @@ const changePasswordByPhone = async (req, res) => {
       });
     }
 
+    // Call service to change password directly
     const result = await userService.changePasswordByPhone(phone_number, newPassword, confirmPassword);
 
     res.status(200).json({
@@ -889,7 +847,7 @@ const changePasswordByPhone = async (req, res) => {
   }
 };
 
-// ============ ADMIN: GET ALL USERS (Unchanged) ============
+// ============ ADMIN: GET ALL USERS ============
 const adminGetAllUsers = async (req, res) => {
   try {
     const { limit = 100, offset = 0 } = req.query;
@@ -909,6 +867,7 @@ const adminGetAllUsers = async (req, res) => {
   }
 };
 
+// ============ ADMIN: GET USER BY PHONE NUMBER ============
 const adminGetUserByPhone = async (req, res) => {
   try {
     const { phone_number } = req.params;
@@ -935,6 +894,7 @@ const adminGetUserByPhone = async (req, res) => {
   }
 };
 
+// ============ ADMIN: SET EXACT BALANCE BY PHONE ============
 const adminSetBalanceByPhone = async (req, res) => {
   try {
     const { phone_number } = req.params;
@@ -969,6 +929,7 @@ const adminSetBalanceByPhone = async (req, res) => {
   }
 };
 
+// ============ ADMIN: ADD BALANCE BY PHONE ============
 const adminAddBalanceByPhone = async (req, res) => {
   try {
     const { phone_number } = req.params;
@@ -1003,6 +964,7 @@ const adminAddBalanceByPhone = async (req, res) => {
   }
 };
 
+// ============ ADMIN: DEDUCT BALANCE BY PHONE ============
 const adminDeductBalanceByPhone = async (req, res) => {
   try {
     const { phone_number } = req.params;
@@ -1037,6 +999,7 @@ const adminDeductBalanceByPhone = async (req, res) => {
   }
 };
 
+// ============ ADMIN: DELETE USER BY PHONE ============
 const adminDeleteUserByPhone = async (req, res) => {
   try {
     const { phone_number } = req.params;
@@ -1063,35 +1026,25 @@ const adminDeleteUserByPhone = async (req, res) => {
   }
 };
 
-// ============ EXPORT ALL FUNCTIONS ============
 module.exports = {
-  // Auth functions
   register,
   login,
   refreshToken,
-  forgotPassword,
-  resetPassword,
-  changePasswordByPhone,
-  
-  // Payment functions - Mongike
   depositMoney,
-  mongikeWebhook,        // NEW: For Mongike callbacks
-  checkPaymentStatus,
-  confirmDeposit,
-  checkPendingPayments,
-  manualConfirmDeposit,
-  
-  // Withdrawal functions - Snippe
   withdrawMoney,
-  AdminWithdrawMoney,
-  AdminWithdrawMoneyDb,
-  
-  // User functions
   checkBalance,
   getProfile,
+  checkPaymentStatus,
+  AdminWithdrawMoney,
   checkAdminStatus,
-  
-  // Admin functions
+  payouWebhook  ,
+  checkPendingPayments,
+  manualConfirmDeposit,
+  confirmDeposit,
+  AdminWithdrawMoneyDb,
+  forgotPassword,       
+  resetPassword,        
+  changePasswordByPhone,
   adminGetAllUsers,
   adminGetUserByPhone,
   adminSetBalanceByPhone,
