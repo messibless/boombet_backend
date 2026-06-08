@@ -1,4 +1,6 @@
 
+// this is user services 
+// auth.service.js 
 
 const bcrypt = require('bcryptjs');
 const userRepository = require('../repositories/user.repository');
@@ -7,6 +9,7 @@ const {
   generateRefreshToken,
   verifyRefreshToken
 } = require('../utils/jwt');
+const { authPlugins } = require('mysql2');
 
 const registerUser = async (phone_number, password) => {
 
