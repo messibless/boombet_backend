@@ -34,8 +34,8 @@ const PORT = process.env.PORT || 5000;
 const allowedOrigins = [
   'http://localhost:5173',   // local dev
   'http://localhost:5174',
-  'http://109.123.246.231:5173/',
-  'https://www.vatesbet.com/',
+  'http://13.140.157.161:5173',
+  'https://www.vatesbet.com',
   'http://www.betnover.com'
 ];
 app.use(helmet());
