@@ -29,14 +29,13 @@ const PORT = process.env.PORT || 5000;
 /* =========================
    GLOBAL MIDDLEWARES
 ========================= */
-// http://localhost:5174/admin-panel/balance
+
 
 const allowedOrigins = [
   'http://localhost:5173',   // local dev
   'http://localhost:5174',
-  'http://13.140.157.161:5173',
-  'https://www.vatesbet.com',
-  'http://www.betnover.com'
+  'http://13.140.157.161',
+ 
 ];
 app.use(helmet());
 app.use(cors({
